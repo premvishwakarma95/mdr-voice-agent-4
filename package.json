@@ -1,0 +1,27 @@
+{
+  "name": "mdr-voice-agent-4",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MDR Agent 4 — shipment opportunity voice agent (Vapi + orchestration service)",
+  "type": "module",
+  "scripts": {
+    "assistant:create": "tsx src/assistant/create.ts",
+    "server:dev": "tsx watch src/server/index.ts",
+    "server:start": "tsx src/server/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "mongoose": "^8.9.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
