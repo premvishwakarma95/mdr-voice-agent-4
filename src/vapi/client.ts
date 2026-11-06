@@ -1,6 +1,7 @@
 import { env } from "../config/env.js";
 
-const VAPI_BASE_URL = "https://api.vapi.ai";
+// Overridable only so the flow test can point at a mock — never set in real envs.
+const VAPI_BASE_URL = process.env.VAPI_API_BASE_URL ?? "https://api.vapi.ai";
 const REQUEST_TIMEOUT_MS = 15_000;
 
 export class VapiError extends Error {
