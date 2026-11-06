@@ -68,7 +68,10 @@ const callAttemptSchema = new Schema(
 
     // End-of-call artifacts
     transcript: String,
+    // Playable signed link — the exact recording_url sent to MDR's /result.
     recordingUrl: String,
+    // Vapi's private R2 path (not playable without credentials) — debug only.
+    rawRecordingUrl: String,
     summary: String,
     endedReason: String,
     startedAt: Date,

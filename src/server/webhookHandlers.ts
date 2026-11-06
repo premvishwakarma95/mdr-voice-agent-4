@@ -245,10 +245,14 @@ export async function handleEndOfCallReport(message: any) {
     return;
   }
 
+  // Store the same playable link we send MDR (signed /recordings proxy), not
+  // Vapi's private R2 path — that one is kept separately for debugging only.
+  const rawRecordingUrl: string | undefined = message?.artifact?.recording?.stereoUrl ?? message?.artifact?.recordingUrl;
+  attempt.rawRecordingUrl = rawRecordingUrl;
   applyCallOutcome(attempt, {
     endedReason: message?.endedReason,
     transcript: message?.artifact?.transcript,
-    recordingUrl: message?.artifact?.recording?.stereoUrl ?? message?.artifact?.recordingUrl,
+    recordingUrl: rawRecordingUrl ? buildPlayableRecordingUrl(vapiCallId) : undefined,
     summary: message?.summary ?? message?.analysis?.summary,
     vapiStartedAt: message?.startedAt,
     vapiEndedAt: message?.endedAt,
@@ -282,8 +286,9 @@ export async function handleEndOfCallReport(message: any) {
             direction: "outbound",
             started_at: message?.startedAt,
             ended_at: message?.endedAt,
-            // Our playable proxy link, not Vapi's private R2 path (see recordings.ts).
-            recording_url: attempt.recordingUrl ? buildPlayableRecordingUrl(vapiCallId) : undefined,
+            // Our playable proxy link (same value stored on the attempt), not
+            // Vapi's private R2 path (see recordings.ts).
+            recording_url: attempt.recordingUrl,
             transcript: attempt.transcript,
             provider: "vapi",
             attempt_number: attempt.attemptNumber,
