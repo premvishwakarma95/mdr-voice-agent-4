@@ -180,7 +180,7 @@ async function createNewRep(params: any, ctx: Ctx) {
   return submitRep(ctx, { name, email, phone, taiSalesRepId, isNewRep: true });
 }
 
-async function scheduleCallback(params: any, { attempt }: Ctx) {
+async function scheduleCallback(params: any, { attempt, contact }: Ctx) {
   // Interpreted as wall-clock time in the zone this attempt used — never any
   // offset the LLM embedded (same rule as Agent 2's wallClockToUtc).
   const raw = str(params?.callbackDateTime);
@@ -206,10 +206,20 @@ async function scheduleCallback(params: any, { attempt }: Ctx) {
   attempt.callbackAt = when;
   attempt.callbackReason = str(params?.reason) || undefined;
   if (str(params?.pendingRepName)) {
+    // Existing rep = exact full-name match on the broker's list (narrowed by
+    // email if two share the name). Deliberately NOT matchReps' first-name
+    // fallback — a new "John Smith" must not be mistaken for "John Bellevaro".
+    const reps: MdrSalesRep[] = contact?.broker_sales_reps ?? [];
+    let existing = reps.filter((r) => str(r?.name) && norm(r.name) === norm(params.pendingRepName));
+    if (existing.length > 1 && str(params?.pendingRepEmail)) {
+      existing = existing.filter((r) => norm(r?.email) === norm(params.pendingRepEmail));
+    }
+    const onFile = existing.length === 1 ? existing[0] : null;
     attempt.pendingRep = {
-      name: str(params.pendingRepName),
-      email: str(params?.pendingRepEmail) || undefined,
-      phone: str(params?.pendingRepPhone) || undefined,
+      name: onFile ? str(onFile.name) : str(params.pendingRepName),
+      email: (onFile ? str(onFile?.email) : "") || str(params?.pendingRepEmail) || undefined,
+      phone: (onFile ? str(onFile?.phone) : "") || str(params?.pendingRepPhone) || undefined,
+      isExistingRep: Boolean(onFile),
     };
   }
   await attempt.save();

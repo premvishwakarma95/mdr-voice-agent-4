@@ -122,17 +122,37 @@ export function buildInquirySentence(payload: ShipmentOpportunityPayload): strin
   return `You have received a new shipment inquiry${shipper}${quote}.`;
 }
 
+const squash = (v: unknown) => String(v ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+
+/**
+ * The person to ask for, or "" when MDR gave no real person — contact_name
+ * missing, or just the company name repeated (seen in MDR test data:
+ * contact_name "Adience Developer Test 1" = company_name). Asking
+ * "Hi, is this IBR Infotech?" sounds broken, so those fall back to asking for
+ * whoever handles sales-rep assignments.
+ */
+export function contactPersonName(payload: ShipmentOpportunityPayload): string {
+  if (!present(payload?.contact_name)) return "";
+  const name = String(payload.contact_name).trim();
+  if (present(payload?.company_name) && squash(name) === squash(payload.company_name)) return "";
+  return name;
+}
+
 /** Opening line, spoken as the per-call firstMessage override (same pattern as Agent 2). */
 export function buildFirstMessage(payload: ShipmentOpportunityPayload, timezone: string): string {
   const greeting = greetingForTimezone(timezone);
-  return present(payload?.contact_name)
-    ? `[warm] ${greeting}! Hi, is this ${payload.contact_name}?`
-    : `[warm] ${greeting}! Hi, this is Everly calling on behalf of MDR. Who am I speaking with?`;
+  const person = contactPersonName(payload);
+  if (person) return `[warm] ${greeting}! Hi, is this ${person}?`;
+  if (present(payload?.company_name)) {
+    return `[warm] ${greeting}! Hi, this is Everly calling on behalf of MDR. Am I speaking with someone at ${String(payload.company_name).trim()} who handles sales representative assignments?`;
+  }
+  return `[warm] ${greeting}! Hi, this is Everly calling on behalf of MDR. Who am I speaking with?`;
 }
 
 /** Voicemail, built server-side so a missing field never leaves a gap in the sentence. */
 export function buildVoicemailMessage(payload: ShipmentOpportunityPayload): string {
-  const name = present(payload?.contact_name) ? `Hi ${payload.contact_name}, ` : "Hi, ";
+  const person = contactPersonName(payload);
+  const name = person ? `Hi ${person}, ` : "Hi, ";
   return (
     `${name}this is Everly, calling on behalf of MDR, My Dray Rate. ${buildInquirySentence(payload)} ` +
     "We need a sales representative assigned to this shipper. I'll follow up again later. Thank you."
@@ -145,7 +165,7 @@ export interface CallContext {
   /** Set when this call is a broker-requested callback. */
   callback?: {
     reason?: string | null;
-    pendingRep?: { name?: string | null; email?: string | null; phone?: string | null } | null;
+    pendingRep?: { name?: string | null; email?: string | null; phone?: string | null; isExistingRep?: boolean | null } | null;
   } | null;
 }
 
@@ -157,10 +177,19 @@ function buildCallbackContext(ctx: CallContext): string {
     const details = [present(rep?.email) ? `email ${rep.email}` : "", present(rep?.phone) ? `phone ${rep.phone}` : ""]
       .filter(Boolean)
       .join(", ");
+    if (rep?.isExistingRep) {
+      return (
+        `This is a callback the broker asked for. On the last call they chose an EXISTING sales representative ` +
+        `already on their list, ${rep.name}${details ? ` (${details})` : ""}, but that rep had no TAI Sales ` +
+        `Representative ID yet. Only ask for the TAI Sales Representative ID now, then call assign_existing_rep ` +
+        `with repName "${rep.name}"${present(rep?.email) ? `, repEmail "${rep.email}"` : ""} and the taiSalesRepId.`
+      );
+    }
     return (
       `This is a callback the broker asked for. On the last call they named a NEW sales representative, ` +
       `${rep.name}${details ? ` (${details})` : ""}, but didn't have the TAI Sales Representative ID yet. ` +
-      `You already have those details — only ask for the TAI Sales Representative ID now.`
+      `You already have those details — only ask for the TAI Sales Representative ID now, then call ` +
+      `create_new_rep with those details and the taiSalesRepId.`
     );
   }
   return `This is a callback the broker asked for${present(ctx.callback.reason) ? ` (reason: ${ctx.callback.reason})` : ""}.`;
@@ -175,7 +204,9 @@ export function buildCallVariables(
   const now = new Date();
   return {
     // The person being called (broker employee) — {Broker Name} in the script.
-    brokerName: present(payload?.contact_name) ? String(payload.contact_name) : "",
+    // "" → no real person on file; the prompt then asks for whoever handles
+    // sales-rep assignments (see contactPersonName).
+    brokerName: contactPersonName(payload) || "the person who handles sales representative assignments",
     brokerCompany: present(payload?.company_name) ? String(payload.company_name) : "",
     shipperName: present(payload?.shipper?.name) ? String(payload.shipper.name) : "",
     quoteId: present(s?.quote_id) ? String(s.quote_id) : "",

@@ -61,6 +61,9 @@ const callAttemptSchema = new Schema(
       name: String,
       email: String,
       phone: String,
+      // true = already in broker_sales_reps (only the TAI ID was missing) →
+      // the callback finishes with assign_existing_rep, not create_new_rep.
+      isExistingRep: Boolean,
     },
 
     // End-of-call artifacts

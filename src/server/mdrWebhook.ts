@@ -23,7 +23,7 @@
 import { Router } from "express";
 import { OutreachContact, WebhookResponse } from "../db/models/index.js";
 import { requireApiKey } from "./auth.js";
-import { processContact } from "./dispatch.js";
+import { processContact, isMdrStop } from "./dispatch.js";
 
 export const mdrWebhookRouter = Router();
 
@@ -88,12 +88,15 @@ mdrWebhookRouter.post("/capture", requireApiKey, async (req, res) => {
   // Instant attempt 1 (eligibility check + dial + CallAttempt), same as IRS.
   try {
     const contact = await OutreachContact.findOne({ outreach_contact_id: outreachContactId });
-    if (!contact || contact.stop_call) {
-      console.log(`webhook capture: outreach contact ${outreachContactId} is stopped locally — not dialing`);
+    // Our own final stops (rep assigned, declined, max attempts) are permanent.
+    // A stop that came from MDR's check-stop is re-checked: MDR may have
+    // reset the contact before re-sending the webhook.
+    if (!contact || (contact.stop_call && !isMdrStop(contact.stop_reason))) {
+      console.log(`webhook capture: outreach contact ${outreachContactId} is stopped locally (${contact?.stop_reason ?? "no contact"}) — not dialing`);
       return;
     }
     const results: Record<string, unknown>[] = [];
-    await processContact(contact, results, false, { remaining: 1 });
+    await processContact(contact, results, false, { remaining: 1 }, { fromWebhook: true });
     console.log(`webhook capture: dispatch result for outreach contact ${outreachContactId}:`, results);
   } catch (err) {
     console.error(`webhook capture: dispatch failed for outreach contact ${outreachContactId}:`, err);
