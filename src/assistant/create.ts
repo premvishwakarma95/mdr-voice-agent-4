@@ -16,7 +16,7 @@
  */
 import { vapi, VapiError } from "../vapi/client.js";
 import { VOICEMAIL_MESSAGE, SYSTEM_PROMPT } from "./prompt.js";
-import { TOOLS, ORCHESTRATION_WEBHOOK_URL } from "./tools.js";
+import { TOOLS, serverConfig } from "./tools.js";
 
 const assistantPayload = {
   // Dashboard label only — never spoken on calls.
@@ -83,7 +83,8 @@ const assistantPayload = {
     summaryPlan: { enabled: false },
     successEvaluationPlan: { enabled: false },
   },
-  server: { url: ORCHESTRATION_WEBHOOK_URL },
+  // Includes server.secret when VAPI_SERVER_SECRET is set (checked in index.ts).
+  server: serverConfig(),
   serverMessages: ["end-of-call-report", "status-update"],
 };
 
