@@ -2,20 +2,22 @@
  * Dispatch — same model as the IRS agent:
  *   - Attempt 1 is placed instantly from MDR's webhook (mdrWebhook.ts calls
  *     processContact for that one contact), with no calling-window gate.
- *   - The cron cycle (index.ts, every 5 min) only picks contacts that already
- *     have at least one CallAttempt — attempts 2-4 — and those are
- *     calling-window gated. Contacts with zero attempts are never picked up
- *     here (the webhook owns attempt 1).
+ *   - The cron cycle (index.ts, every 5 min) picks every contact that isn't
+ *     stopped: attempts 2-4 on the cadence, plus a retry of attempt 1 when
+ *     the webhook couldn't place it (check-stop error, bad phone, config).
+ *     Everything the cron dials is calling-window gated, except callbacks.
  *   - POST /dispatch/run (x-api-key; ?dryRun=true) runs the same cron cycle.
  *
  * processContact, in order:
  *   1. MDR check-stop, fresh, every time. call_stopped=1 → mark local
- *      stop_call and skip. A FAILED check (network/422/bad shape) → skip this
- *      time only (fail safe, never dial blind), don't mark stopped.
+ *      stop_call (reason prefixed MDR_STOP_PREFIX) and skip. call_stopped=0
+ *      lifts an earlier MDR-only stop (re-sent webhook after MDR reset). A
+ *      FAILED check (network/422/bad shape) → skip this time only (fail
+ *      safe, never dial blind), don't mark stopped.
  *   2. Next attempt number from existing CallAttempts; max MAX_CALL_ATTEMPTS (4).
  *   3. Due time: the callback time if the last attempt booked one, else the
- *      cadence. Attempt 1 and broker-named callbacks skip the window (same as
- *      IRS); attempts 2-4 on the cadence are window-gated.
+ *      cadence. Attempt 1 from the webhook and broker-named callbacks skip
+ *      the window (same as IRS); every other cron dial is window-gated.
  *   4. At most MAX_DIALS_PER_CYCLE real dials per cron cycle.
  *   5. Create the CallAttempt (unique index = idempotent), then dial.
  *
@@ -39,6 +41,14 @@ type Result = Record<string, unknown>;
 /** Call results that end outreach for this contact — never dial again after one. */
 const FINAL_RESULTS = new Set(["rep_assigned", "declined"]);
 
+/**
+ * Prefix for stops that came from MDR's check-stop. Unlike our own stops
+ * (rep assigned, declined, max attempts), these aren't final: if MDR
+ * un-stops the contact and re-sends the webhook, we re-check and may dial.
+ */
+export const MDR_STOP_PREFIX = "Stopped by MDR (check-stop)";
+export const isMdrStop = (reason: unknown) => typeof reason === "string" && reason.startsWith(MDR_STOP_PREFIX);
+
 function maxDialsPerCycle(): number {
   const n = Number(process.env.MAX_DIALS_PER_CYCLE);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
@@ -55,10 +65,11 @@ export async function runDispatchCycle(dryRun: boolean): Promise<
   try {
     let contacts;
     try {
-      // Only contacts whose first attempt already happened (IRS rule) —
-      // attempt 1 belongs to the webhook.
-      const withAttempts = await CallAttempt.distinct("outreachContactId");
-      contacts = await OutreachContact.find({ stop_call: false, outreach_contact_id: { $in: withAttempts } }).sort({ createdAt: 1 });
+      // Attempt 1 belongs to the webhook (dialed instantly). The cron places
+      // attempts 2-4, and also retries a first attempt the webhook couldn't
+      // place (MDR check-stop error, bad phone, config) — that retry is
+      // calling-window gated like any cron dial.
+      contacts = await OutreachContact.find({ stop_call: false }).sort({ createdAt: 1 });
     } catch (err) {
       console.error("dispatch: failed to fetch outreach contacts:", err);
       return { ok: false, error: `Failed to fetch outreach contacts: ${(err as Error)?.message}` };
@@ -92,7 +103,13 @@ dispatchRouter.post("/run", requireApiKey, async (req, res) => {
   res.status(result.ok ? 200 : 500).json(result);
 });
 
-export async function processContact(contact: any, results: Result[], dryRun: boolean, budget: { remaining: number }) {
+export async function processContact(
+  contact: any,
+  results: Result[],
+  dryRun: boolean,
+  budget: { remaining: number },
+  opts: { fromWebhook?: boolean } = {}
+) {
   const id: number = contact?.outreach_contact_id;
   const push = (r: Result) => results.push({ outreachContactId: id, ...r });
 
@@ -107,7 +124,7 @@ export async function processContact(contact: any, results: Result[], dryRun: bo
       try {
         await OutreachContact.updateOne(
           { outreach_contact_id: id },
-          { stop_call: true, stop_reason: stop.reason ?? "Stopped by MDR (check-stop)" }
+          { stop_call: true, stop_reason: stop.reason ? `${MDR_STOP_PREFIX}: ${stop.reason}` : MDR_STOP_PREFIX }
         );
       } catch (err) {
         console.error(`dispatch: failed to persist stop_call for ${id}:`, err);
@@ -115,6 +132,15 @@ export async function processContact(contact: any, results: Result[], dryRun: bo
     }
     push({ outcome: "stopped_by_mdr", reason: stop.reason });
     return;
+  }
+  // MDR says callable again — lift a stop that only MDR had put on.
+  if (contact?.stop_call && isMdrStop(contact?.stop_reason) && !dryRun) {
+    try {
+      await OutreachContact.updateOne({ outreach_contact_id: id }, { stop_call: false, $unset: { stop_reason: 1 } });
+      console.log(`dispatch: MDR un-stopped outreach contact ${id} — stop lifted`);
+    } catch (err) {
+      console.error(`dispatch: failed to lift MDR stop for ${id}:`, err);
+    }
   }
 
   // 2. Attempt history.
@@ -180,9 +206,11 @@ export async function processContact(contact: any, results: Result[], dryRun: bo
     push({ outcome: "not_due_yet", attemptNumber: nextAttemptNumber, dueAt: scheduledFor.toISOString(), isCallback });
     return;
   }
-  // Attempt 1 (instant, from the webhook) and broker-named callbacks are not
-  // window-gated — same as IRS. Cadence attempts 2-4 are.
-  if (nextAttemptNumber > 1 && !isCallback && !isWithinCallingWindow(timezone, now)) {
+  // Attempt 1 straight from the webhook and broker-named callbacks are not
+  // window-gated — same as IRS. Everything the cron dials otherwise is
+  // (attempts 2-4, and a retried attempt 1).
+  const instantFirstCall = nextAttemptNumber === 1 && opts.fromWebhook === true;
+  if (!instantFirstCall && !isCallback && !isWithinCallingWindow(timezone, now)) {
     push({ outcome: "outside_calling_window", timezone });
     return;
   }
