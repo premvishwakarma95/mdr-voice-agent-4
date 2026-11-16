@@ -63,6 +63,32 @@ function spellDigits(value: string | number): string {
   return String(value).trim().split("").join(" ");
 }
 
+/** Standard container type codes -> words, so TTS doesn't say "20 feet r" for 20' FR. */
+const EQUIPMENT_CODES: Record<string, string> = {
+  FR: "flat rack",
+  OT: "open top",
+  HC: "high cube",
+  HQ: "high cube",
+  DV: "dry van",
+  DC: "dry container",
+  GP: "general purpose",
+  RF: "reefer",
+  RE: "reefer",
+  RH: "high cube reefer",
+  TK: "tank",
+  PL: "platform",
+};
+
+/** "20' FR" -> "20-foot flat rack", "40HC" -> "40-foot high cube"; unknown text is left as-is. */
+export function spokenEquipment(value: string): string {
+  const m = String(value).trim().match(/^(\d{2})\s*(?:'|’|ft\.?|feet|foot)?\s*-?\s*([A-Za-z]{2})$/i);
+  if (m) {
+    const words = EQUIPMENT_CODES[m[2].toUpperCase()];
+    if (words) return `${m[1]}-foot ${words}`;
+  }
+  return String(value).trim();
+}
+
 /**
  * Spoken shipment lines, in the transcript's order (Pickup, Destination,
  * Equipment, Length, Commodity) — only these script fields, and only when
@@ -76,7 +102,7 @@ export function buildShipmentDetails(payload: ShipmentOpportunityPayload): strin
 
   if (present(s?.origin_zip)) lines.push(`Pickup: ZIP ${spellDigits(s.origin_zip)}`);
   if (present(s?.destination_zip)) lines.push(`Destination: ZIP ${spellDigits(s.destination_zip)}`);
-  if (present(s?.equipment_type)) lines.push(`Equipment: ${s.equipment_type}`);
+  if (present(s?.equipment_type)) lines.push(`Equipment: ${spokenEquipment(String(s.equipment_type))}`);
   if (present(s?.length)) lines.push(`Length: ${s.length}`);
   if (present(s?.commodity_description)) lines.push(`Commodity: ${s.commodity_description}`);
 

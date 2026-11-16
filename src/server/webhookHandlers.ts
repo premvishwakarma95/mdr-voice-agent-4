@@ -227,6 +227,20 @@ async function scheduleCallback(params: any, { attempt, contact }: Ctx) {
 }
 
 async function logDecline(params: any, ctx: Ctx) {
+  // A decline is permanent (stop_call true + DECLINED to MDR), so it needs an
+  // explicit yes to a confirmation question. A live call (contact 35,
+  // 2026-11-16) logged refuses_to_assign off a cut-off "No. Currently, I...".
+  if (params?.confirmedByBroker !== true) {
+    return {
+      ok: false,
+      error: "needs_confirmation",
+      instruction:
+        "Nothing was recorded. Ask the broker to confirm in plain words first, e.g. \"Just to confirm, " +
+        "you don't want to assign a sales representative for this shipper?\" Only call log_decline again " +
+        "with confirmedByBroker true after they clearly say yes. If they mean 'not now' or 'later', use " +
+        "schedule_callback instead.",
+    };
+  }
   ctx.attempt.callResult = "declined";
   ctx.attempt.declineReason = str(params?.reason) || "other";
   ctx.attempt.declineNote = str(params?.note) || undefined;
