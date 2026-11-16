@@ -100,14 +100,22 @@ export const TOOLS = [
     type: "function" as const,
     function: {
       name: "log_decline",
-      description: "Record that the broker won't assign a sales representative on this call and doesn't want a callback.",
+      description:
+        "FINAL and permanent: records that the broker will not assign a sales representative and MDR stops " +
+        "calling. Only use after you asked a plain confirmation question and the broker clearly said yes. " +
+        "Never use it for a short, cut-off or unclear 'no', or for 'not now' / 'busy' / 'later' (use " +
+        "schedule_callback for those).",
       parameters: {
         type: "object",
         properties: {
           reason: { type: "string", enum: DECLINE_REASONS as unknown as string[] },
-          note: { type: "string", description: "free-text detail; required if reason is 'other'" },
+          note: { type: "string", description: "what the broker actually said, in their words" },
+          confirmedByBroker: {
+            type: "boolean",
+            description: "true only if the broker clearly said yes to your confirmation question about not assigning",
+          },
         },
-        required: ["reason"],
+        required: ["reason", "note", "confirmedByBroker"],
       },
     },
     server: serverConfig(),
