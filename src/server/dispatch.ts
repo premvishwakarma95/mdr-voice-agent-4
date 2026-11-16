@@ -2,10 +2,11 @@
  * Dispatch — same model as the IRS agent:
  *   - Attempt 1 is placed instantly from MDR's webhook (mdrWebhook.ts calls
  *     processContact for that one contact), with no calling-window gate.
- *   - The cron cycle (index.ts, every 5 min) picks every contact that isn't
- *     stopped: attempts 2-4 on the cadence, plus a retry of attempt 1 when
- *     the webhook couldn't place it (check-stop error, bad phone, config).
- *     Everything the cron dials is calling-window gated, except callbacks.
+ *   - The cron cycle (index.ts, every 5 min) only picks contacts that are
+ *     not stopped AND already have at least one CallAttempt (same rule as
+ *     IRS) — attempts 2-4 and callbacks. A contact with zero attempts belongs
+ *     to the webhook, so the two never process a new contact concurrently.
+ *     Cron dials are calling-window gated, except callbacks.
  *   - POST /dispatch/run (x-api-key; ?dryRun=true) runs the same cron cycle.
  *
  * processContact, in order:
@@ -65,11 +66,14 @@ export async function runDispatchCycle(dryRun: boolean): Promise<
   try {
     let contacts;
     try {
-      // Attempt 1 belongs to the webhook (dialed instantly). The cron places
-      // attempts 2-4, and also retries a first attempt the webhook couldn't
-      // place (MDR check-stop error, bad phone, config) — that retry is
-      // calling-window gated like any cron dial.
-      contacts = await OutreachContact.find({ stop_call: false }).sort({ createdAt: 1 });
+      // Same rule as IRS (dispatch.ts processLoad): the cron only picks
+      // contacts that already have at least one CallAttempt. Attempt 1 belongs
+      // to the webhook alone, so a contact the webhook has just stored (zero
+      // attempts) is never picked here — webhook and cron can't work on the
+      // same new contact at the same time. The unique
+      // {outreachContactId, attemptNumber} index stays as the backstop.
+      const withAttempts = await CallAttempt.distinct("outreachContactId");
+      contacts = await OutreachContact.find({ stop_call: false, outreach_contact_id: { $in: withAttempts } }).sort({ createdAt: 1 });
     } catch (err) {
       console.error("dispatch: failed to fetch outreach contacts:", err);
       return { ok: false, error: `Failed to fetch outreach contacts: ${(err as Error)?.message}` };
