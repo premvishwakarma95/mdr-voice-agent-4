@@ -127,25 +127,51 @@ export function buildSalesRepList(payload: ShipmentOpportunityPayload): string {
 /** Max rep names Everly reads aloud when asked for the list (client feedback 2026-11-20). */
 export const REP_NAMES_TO_READ = 4;
 
-/**
- * The exact rep-list sentence Everly may say when asked "do you have a list?".
- * A live call read 25+ names (contact 4); now only the first few are spoken
- * and, if there are more, Everly asks for the rep's name instead. Junk
- * entries (no letters, or a single character like "l") are skipped.
- */
-export function buildRepListToSay(payload: ShipmentOpportunityPayload): string {
-  const names = (payload?.broker_sales_reps ?? [])
+/** Rep names fit to read aloud — junk entries (no letters, or a single character like "l") skipped. */
+function speakableRepNames(payload: ShipmentOpportunityPayload): string[] {
+  return (payload?.broker_sales_reps ?? [])
     .map((rep) => (present(rep?.name) ? String(rep.name).trim().replace(/\s+/g, " ") : ""))
     .filter((name) => name.length >= 2 && /[a-z]{2}/i.test(name));
-  if (names.length === 0) return "";
-  const shown = names.slice(0, REP_NAMES_TO_READ);
-  const list = shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
-  const more = names.length - shown.length;
-  if (more === 0) return `The sales representatives on your account are ${list}. Which one would you like to assign?`;
-  return (
-    `You have ${names.length} sales representatives on your account, including ${list}. ` +
-    `Which representative would you like to assign? Just tell me their name and I'll look them up.`
-  );
+}
+
+const joinNames = (names: string[]) =>
+  names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+
+/**
+ * The rep list split into spoken batches of at most 4 names (client feedback
+ * 2026-11-20: a live call read 25+ names at once). Batch 1 is said when the
+ * broker asks for the list; each later batch only when they ask for more.
+ */
+export function buildRepListBatches(payload: ShipmentOpportunityPayload): string[] {
+  const names = speakableRepNames(payload);
+  if (names.length === 0) return [];
+  const batches: string[] = [];
+  for (let i = 0; i < names.length; i += REP_NAMES_TO_READ) {
+    const chunk = names.slice(i, i + REP_NAMES_TO_READ);
+    const left = names.length - (i + chunk.length);
+    if (i === 0) {
+      batches.push(
+        left === 0
+          ? `The sales representatives on your account are ${joinNames(chunk)}. Which one would you like to assign?`
+          : `You have ${names.length} sales representatives on your account. The first few are ${joinNames(chunk)}. ` +
+              `Which one would you like to assign, or shall I read more?`
+      );
+    } else {
+      batches.push(
+        left === 0
+          ? `The last ones are ${joinNames(chunk)}. Which one would you like to assign?`
+          : `Next: ${joinNames(chunk)}. Which one would you like to assign, or shall I read more?`
+      );
+    }
+  }
+  return batches;
+}
+
+/** The batches as numbered prompt text ("Batch 1: ..."), or "" if there are no reps. */
+export function buildRepListToSay(payload: ShipmentOpportunityPayload): string {
+  return buildRepListBatches(payload)
+    .map((text, i) => `Batch ${i + 1}: "${text}"`)
+    .join("\n");
 }
 
 /** IANA zone for the calling window/greeting: payload's own if valid, else CALLING_TIMEZONE, else US Eastern. */
@@ -264,7 +290,7 @@ export function buildCallVariables(
     // Pre-filtered: only fields MDR actually provided. Read verbatim.
     shipmentDetails: buildShipmentDetails(payload),
     salesRepList: buildSalesRepList(payload) || "(none on file)",
-    repListToSay: buildRepListToSay(payload) || "There are no sales representatives on file for your account yet.",
+    repListToSay: buildRepListToSay(payload) || `Batch 1: "There are no sales representatives on file for your account yet."`,
     // Everything MDR sent, untouched, for the agent's reference (e.g. a
     // broker asking about the reference number). Not read out unprompted.
     rawShipment: JSON.stringify(s ?? {}),
