@@ -34,18 +34,28 @@ export const TOOLS = [
       name: "assign_existing_rep",
       description:
         "Assign one of the broker's EXISTING sales representatives (from the sales rep list) to this shipper. " +
-        "Call as soon as the broker names someone who appears on the list. If the result says multiple_matches, " +
-        "read each candidate's email and phone, ask which one, then call again with repEmail. If it says " +
-        "missing_tai_id, ask for the TAI Sales Representative ID and call again with taiSalesRepId. If it says " +
-        "no_match, treat the person as a new rep.",
+        "First read the rep's full name back and get a clear yes, then call with confirmedByBroker true. If the " +
+        "result says needs_confirmation, ask the confirmation question it gives. If multiple_matches, read each " +
+        "candidate's email and phone, ask which one, then call again with repEmail. If missing_tai_id, ask for " +
+        "the TAI Sales Representative ID and call again with taiSalesRepId. If missing_contact_details, ask for " +
+        "the missing email/phone, read it back, and call again with repEmail/repPhone. If no_match, treat the " +
+        "person as a new rep.",
       parameters: {
         type: "object",
         properties: {
           repName: { type: "string", description: "the rep's name as it appears on the sales rep list" },
-          repEmail: { type: "string", description: "only to choose between reps with the same name" },
+          confirmedByBroker: {
+            type: "boolean",
+            description: "true only after you read this rep's full name back and the broker clearly said yes",
+          },
+          repEmail: {
+            type: "string",
+            description: "to choose between reps with the same name, or the email the broker gave when the rep has none on file",
+          },
+          repPhone: { type: "string", description: `only when the rep has no phone on file: ${phoneDescription}` },
           taiSalesRepId: { type: "string", description: "only if the rep has no TAI ID on file and the broker just gave it" },
         },
-        required: ["repName"],
+        required: ["repName", "confirmedByBroker"],
       },
     },
     server: serverConfig(),

@@ -121,7 +121,19 @@ async function submitRep(
     attempt.mdrRepError = (err as Error)?.message;
     await attempt.save();
     console.error(`sales-representative submit failed for ${attempt.outreachContactId}:`, err);
-    return { ok: false, error: "MDR did not accept the sales representative assignment" };
+    // MDR's validation errors name the fields it wants — let Everly ask for them.
+    const fieldErrors = (err as any)?.status === 422 ? Object.keys((err as any)?.body?.errors ?? {}) : [];
+    const askable = fieldErrors.filter((f) => f === "email" || f === "phone");
+    if (askable.length > 0 && askable.length === fieldErrors.length) {
+      return missingDetails(rep.name, askable);
+    }
+    return {
+      ok: false,
+      error: "mdr_rejected",
+      message:
+        "MDR did not save the assignment. Do NOT end the call silently: tell the broker there was a system " +
+        `issue saving it, that you've noted ${rep.name} as their choice and MDR's team will follow up, then sign off.`,
+    };
   }
   attempt.mdrRepSubmission = "submitted";
   attempt.callResult = "rep_assigned";
@@ -150,6 +162,19 @@ async function assignExistingRep(params: any, ctx: Ctx) {
   }
 
   const rep = matches[0];
+  // Read the matched full name back before assigning. A live call (contact 4,
+  // 2026-11-20) assigned "John Bellevaro" off "the first one... John
+  // something, John?" with no confirmation.
+  if (params?.confirmedByBroker !== true) {
+    return {
+      ok: false,
+      error: "needs_confirmation",
+      repName: str(rep?.name),
+      message:
+        `Nothing was assigned yet. Ask the broker: "Just to confirm, you'd like to assign ${str(rep?.name)}?" ` +
+        "Call assign_existing_rep again with confirmedByBroker true only after they clearly say yes.",
+    };
+  }
   const taiSalesRepId = str(rep?.sales_rep_id) || str(params?.taiSalesRepId);
   if (!taiSalesRepId) {
     return {
@@ -158,14 +183,35 @@ async function assignExistingRep(params: any, ctx: Ctx) {
       message: "This rep has no TAI Sales Representative ID on file. Ask the broker for it; if they don't have it, explain why it's needed and offer a callback.",
     };
   }
+  // MDR rejects a rep without email or phone (HTTP 422), and some reps on
+  // MDR's list have neither — collect what's missing on the call.
+  const email = str(rep?.email) || str(params?.repEmail);
+  const phone = str(rep?.phone) || str(params?.repPhone);
+  const missing = [!email && "email", !phone && "phone"].filter(Boolean) as string[];
+  if (missing.length > 0) {
+    return missingDetails(str(rep?.name), missing);
+  }
   return submitRep(ctx, {
     name: str(rep?.name),
-    email: str(rep?.email),
-    phone: str(rep?.phone),
+    email,
+    phone,
     taiSalesRepId,
     isNewRep: false,
     mdrSalesRepId: rep?.id,
   });
+}
+
+function missingDetails(name: string, missing: string[]) {
+  const words = missing.map((m) => (m === "email" ? "email address" : "phone number")).join(" and ");
+  return {
+    ok: false,
+    error: "missing_contact_details",
+    missing,
+    message:
+      `Nothing was assigned yet. MDR needs the ${words} for ${name}. Ask the broker for it, read it back, ` +
+      `then call assign_existing_rep again with the same repName, confirmedByBroker true` +
+      `${missing.includes("email") ? ", repEmail" : ""}${missing.includes("phone") ? ", repPhone" : ""}.`,
+  };
 }
 
 async function createNewRep(params: any, ctx: Ctx) {
