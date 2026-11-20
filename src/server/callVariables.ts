@@ -124,6 +124,30 @@ export function buildSalesRepList(payload: ShipmentOpportunityPayload): string {
     .join("\n");
 }
 
+/** Max rep names Everly reads aloud when asked for the list (client feedback 2026-11-20). */
+export const REP_NAMES_TO_READ = 4;
+
+/**
+ * The exact rep-list sentence Everly may say when asked "do you have a list?".
+ * A live call read 25+ names (contact 4); now only the first few are spoken
+ * and, if there are more, Everly asks for the rep's name instead. Junk
+ * entries (no letters, or a single character like "l") are skipped.
+ */
+export function buildRepListToSay(payload: ShipmentOpportunityPayload): string {
+  const names = (payload?.broker_sales_reps ?? [])
+    .map((rep) => (present(rep?.name) ? String(rep.name).trim().replace(/\s+/g, " ") : ""))
+    .filter((name) => name.length >= 2 && /[a-z]{2}/i.test(name));
+  if (names.length === 0) return "";
+  const shown = names.slice(0, REP_NAMES_TO_READ);
+  const list = shown.length === 1 ? shown[0] : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
+  const more = names.length - shown.length;
+  if (more === 0) return `The sales representatives on your account are ${list}. Which one would you like to assign?`;
+  return (
+    `You have ${names.length} sales representatives on your account, including ${list}. ` +
+    `Which representative would you like to assign? Just tell me their name and I'll look them up.`
+  );
+}
+
 /** IANA zone for the calling window/greeting: payload's own if valid, else CALLING_TIMEZONE, else US Eastern. */
 export function resolveTimezone(contact: { timezone?: string | null } | null | undefined): string {
   if (isValidTimezone(contact?.timezone)) return contact.timezone;
@@ -240,6 +264,7 @@ export function buildCallVariables(
     // Pre-filtered: only fields MDR actually provided. Read verbatim.
     shipmentDetails: buildShipmentDetails(payload),
     salesRepList: buildSalesRepList(payload) || "(none on file)",
+    repListToSay: buildRepListToSay(payload) || "There are no sales representatives on file for your account yet.",
     // Everything MDR sent, untouched, for the agent's reference (e.g. a
     // broker asking about the reference number). Not read out unprompted.
     rawShipment: JSON.stringify(s ?? {}),
