@@ -10,17 +10,19 @@
  *   - POST /dispatch/run (x-api-key; ?dryRun=true) runs the same cron cycle.
  *
  * processContact, in order:
- *   1. MDR check-stop, fresh, every time. call_stopped=1 → mark local
- *      stop_call (reason prefixed MDR_STOP_PREFIX) and skip. call_stopped=0
- *      lifts an earlier MDR-only stop (re-sent webhook after MDR reset). A
- *      FAILED check (network/422/bad shape) → skip this time only (fail
- *      safe, never dial blind), don't mark stopped.
+ *   1. Webhook path only: MDR check-stop up front (a re-sent webhook may
+ *      need to lift an MDR-only stop even when nothing is due).
  *   2. Next attempt number from existing CallAttempts; max MAX_CALL_ATTEMPTS (4).
  *   3. Due time: the callback time if the last attempt booked one, else the
  *      cadence. Attempt 1 from the webhook and broker-named callbacks skip
  *      the window (same as IRS); every other cron dial is window-gated.
- *   4. At most MAX_DIALS_PER_CYCLE real dials per cron cycle.
- *   5. Create the CallAttempt (unique index = idempotent), then dial.
+ *   4. Cron path: MDR check-stop only now, right before dialing — never for
+ *      contacts that aren't due (differs from IRS, which asks MDR every
+ *      cycle). call_stopped=1 → mark local stop_call (reason prefixed
+ *      MDR_STOP_PREFIX) and skip. A FAILED check (network/422/bad shape) →
+ *      skip this time only (fail safe, never dial blind), don't mark stopped.
+ *   5. At most MAX_DIALS_PER_CYCLE real dials per cron cycle.
+ *   6. Create the CallAttempt (unique index = idempotent), then dial.
  *
  * Every failure is caught per contact and recorded as a result entry — one
  * bad contact never stops the rest of the cycle.
@@ -107,21 +109,17 @@ dispatchRouter.post("/run", requireApiKey, async (req, res) => {
   res.status(result.ok ? 200 : 500).json(result);
 });
 
-export async function processContact(
-  contact: any,
-  results: Result[],
-  dryRun: boolean,
-  budget: { remaining: number },
-  opts: { fromWebhook?: boolean } = {}
-) {
+/**
+ * Asks MDR's check-stop. Returns false (and records the outcome) when the
+ * contact must not be called; lifts a stop that only MDR had put on when
+ * MDR now says callable. Never throws — see checkCallStop.
+ */
+async function passesMdrStopCheck(contact: any, dryRun: boolean, push: (r: Result) => void): Promise<boolean> {
   const id: number = contact?.outreach_contact_id;
-  const push = (r: Result) => results.push({ outreachContactId: id, ...r });
-
-  // 1. Fresh MDR stop check (never throws — see checkCallStop).
   const stop = await checkCallStop(id);
   if (stop.error) {
     push({ outcome: "check_stop_failed", error: stop.error });
-    return;
+    return false;
   }
   if (stop.stopped) {
     if (!dryRun) {
@@ -135,7 +133,7 @@ export async function processContact(
       }
     }
     push({ outcome: "stopped_by_mdr", reason: stop.reason });
-    return;
+    return false;
   }
   // MDR says callable again — lift a stop that only MDR had put on.
   if (contact?.stop_call && isMdrStop(contact?.stop_reason) && !dryRun) {
@@ -145,6 +143,26 @@ export async function processContact(
     } catch (err) {
       console.error(`dispatch: failed to lift MDR stop for ${id}:`, err);
     }
+  }
+  return true;
+}
+
+export async function processContact(
+  contact: any,
+  results: Result[],
+  dryRun: boolean,
+  budget: { remaining: number },
+  opts: { fromWebhook?: boolean } = {}
+) {
+  const id: number = contact?.outreach_contact_id;
+  const push = (r: Result) => results.push({ outreachContactId: id, ...r });
+
+  // 1. MDR stop check. The cron asks MDR only right before it would dial
+  // (step 4) — asking every 5-minute cycle for contacts that aren't due
+  // yet was pure load on MDR. The webhook path asks up front, because a
+  // re-sent webhook may need to lift an MDR stop even when nothing is due.
+  if (opts.fromWebhook) {
+    if (!(await passesMdrStopCheck(contact, dryRun, push))) return;
   }
 
   // 2. Attempt history.
@@ -229,7 +247,13 @@ export async function processContact(
     return;
   }
 
-  // 4. Per-cycle dial cap.
+  // 4. Fresh MDR stop check right before dialing (cron path; the webhook
+  // path already asked in step 1 a moment ago).
+  if (!opts.fromWebhook) {
+    if (!(await passesMdrStopCheck(contact, dryRun, push))) return;
+  }
+
+  // 5. Per-cycle dial cap.
   if (budget.remaining <= 0) {
     push({ outcome: "deferred_dial_cap_reached", attemptNumber: nextAttemptNumber });
     return;
@@ -241,7 +265,7 @@ export async function processContact(
     return;
   }
 
-  // 5. Claim the attempt slot, then dial.
+  // 6. Claim the attempt slot, then dial.
   let attempt;
   try {
     attempt = await CallAttempt.create({
